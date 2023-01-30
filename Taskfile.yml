@@ -1,0 +1,69 @@
+---
+version: '3'
+includes:
+  utils:
+    taskfile: utils/Taskfile_{{ OS }}.yml
+    dir: .
+vars:
+  PKI_PATH: local
+  PKI_MAX_LEASE_TTL: '87600h'
+  PKI_COMMON_NAME: pki.local
+  PKI_ISSUER_NAME: issuer.local
+  TLS_CERTS_DIR: local-cert-data
+  PKI_ISSUER_JSON: '{{ .TLS_CERTS_DIR }}/{{ .PKI_ISSUER_NAME }}.json'
+env:
+  VAULT_TOKEN: root
+  VAULT_ADDR: https://127.0.0.1:8200
+  VAULT_CACERT: '{{ .TLS_CERTS_DIR }}/vault-ca.pem'
+  CURL_CA_BUNDLE: '{{ .TLS_CERTS_DIR }}/vault-ca.pem'
+tasks:
+  launch-server:
+    cmds:
+      - |
+        vault server \
+          -dev \
+          -dev-root-token-id "{{ .VAULT_TOKEN }}" \
+          -dev-tls \
+          -dev-tls-cert-dir "{{ .TLS_CERTS_DIR }}"
+  status:
+    cmds:
+      - vault status
+      - vault token lookup
+  exe:
+    cmds:
+      - vault list -format=json {{ .PKI_PATH }}/issuers/{{ .PKI_ISSUER_NAME }}
+  enable-pki-backend:
+    cmds:
+      - |
+        vault secrets enable \
+          -path={{ .PKI_PATH | quote }} \
+          -max-lease-ttl={{ .PKI_MAX_LEASE_TTL | quote }} \
+          pki
+    status:
+      - vault secrets list -format=json | jq -e '.["{{ .PKI_PATH }}/"]'
+  config-root:
+    deps:
+      - enable-pki-backend
+    cmds:
+      - |
+        vault write \
+          -format=json \
+          {{ .PKI_PATH }}/root/generate/internal \
+          common_name={{ .PKI_COMMON_NAME | quote }} \
+          issuer_name={{ .PKI_ISSUER_NAME | quote }} \
+          ttl={{ .PKI_MAX_LEASE_TTL | quote }} \
+            > {{ .PKI_ISSUER_JSON | quote }}
+    status:
+      - test -f {{ .PKI_ISSUER_JSON | quote }}
+  delete:
+    cmds:
+      - |
+        vault delete '{{ .PKI_PATH }}/issuer/{{ .PKI_ISSUER_NAME }}'
+      - task: utils:rm
+        vars:
+          f: '{{ .PKI_ISSUER_JSON }}'
+      - |
+        vault \
+          secrets \
+          disable \
+          {{ .PKI_PATH }}/

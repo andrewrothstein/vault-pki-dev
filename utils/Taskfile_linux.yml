@@ -1,0 +1,8 @@
+---
+version: '3'
+tasks:
+  rm:
+    vars:
+      f: '{{ .f }}'
+    cmds:
+      - rm -f {{ .f | quote }}
