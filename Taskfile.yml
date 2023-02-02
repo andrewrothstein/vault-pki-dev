@@ -5,17 +5,25 @@ includes:
     taskfile: utils/Taskfile_{{ OS }}.yml
     dir: .
 vars:
-  PKI_PATH: local
-  PKI_MAX_LEASE_TTL: '87600h'
-  PKI_COMMON_NAME: pki.local
-  PKI_ISSUER_NAME: issuer.local
   TLS_CERTS_DIR: local-cert-data
-  PKI_ISSUER_JSON: '{{ .TLS_CERTS_DIR }}/{{ .PKI_ISSUER_NAME }}.json'
+  # root issuer
+  ROOT_PATH: local-root
+  ROOT_MAX_LEASE_TTL: '87600h'
+  ROOT_COMMON_NAME: root-cn
+  ROOT_ISSUER_NAME: root-issuer
+  ROOT_ISSUER_TTL: '87600h'
+  ROOT_ISSUER_JSON: '{{ .TLS_CERTS_DIR }}/{{ .ROOT_ISSUER_NAME }}.json'
+  # intermediate issuer
+  INT_PATH: local-int
+  INT_MAX_LEASE_TTL: '43800h'
+  INT_COMMON_NAME: int-cn
+  INT_ISSUER_NAME: int-issuer
+  INT_ISSUER_TTL: '43800h'
+  INT_ISSUER_JSON: '{{ .TLS_CERTS_DIR }}/{{ .INT_ISSUER_NAME }}.json'
 env:
-  VAULT_TOKEN: root
+  VAULT_TOKEN: root-vault-token
   VAULT_ADDR: https://127.0.0.1:8200
   VAULT_CACERT: '{{ .TLS_CERTS_DIR }}/vault-ca.pem'
-  CURL_CA_BUNDLE: '{{ .TLS_CERTS_DIR }}/vault-ca.pem'
 tasks:
   launch-server:
     cmds:
@@ -29,41 +37,136 @@ tasks:
     cmds:
       - vault status
       - vault token lookup
-  exe:
+  list-issuer:
+    internal: true
+    vars:
+      path: '{{ .path }}'
+      issuer_name: '{{ .issuer_name }}'
     cmds:
-      - vault list -format=json {{ .PKI_PATH }}/issuers/{{ .PKI_ISSUER_NAME }}
-  enable-pki-backend:
+      - vault list -format=json '{{ .path }}/issuers/{{ .issuer_name }}'
+  enable-backend:
+    internal: true
+    vars:
+      path: '{{ .path }}'
+      max_lease_ttl: '{{ .max_lease_ttl }}'
     cmds:
       - |
         vault secrets enable \
-          -path={{ .PKI_PATH | quote }} \
-          -max-lease-ttl={{ .PKI_MAX_LEASE_TTL | quote }} \
+          -path={{ .path | quote }} \
+          -max-lease-ttl={{ .max_lease_ttl | quote }} \
           pki
     status:
-      - vault secrets list -format=json | jq -e '.["{{ .PKI_PATH }}/"]'
-  config-root:
-    deps:
-      - enable-pki-backend
+      - vault secrets list -format=json | jq -e '.["{{ .path }}/"]'
+  config-issuer:
+    internal: true
+    vars:
+      issuer_type: '{{ .issuer_type }}'
+      path: '{{ .path }}'
+      common_name: '{{ .common_name }}'
+      issuer_name: '{{ .issuer_name }}'
+      ttl: '{{ .ttl }}'
+      issuer_json: '{{ .issuer_json }}'
     cmds:
       - |
         vault write \
           -format=json \
-          {{ .PKI_PATH }}/root/generate/internal \
-          common_name={{ .PKI_COMMON_NAME | quote }} \
-          issuer_name={{ .PKI_ISSUER_NAME | quote }} \
-          ttl={{ .PKI_MAX_LEASE_TTL | quote }} \
-            > {{ .PKI_ISSUER_JSON | quote }}
+          {{ .path }}/{{ .issuer_type }}/generate/internal \
+          common_name={{ .common_name | quote }} \
+          issuer_name={{ .issuer_name | quote }} \
+          ttl={{ .ttl | quote }} \
+            > {{ .issuer_json | quote }}
     status:
-      - test -f {{ .PKI_ISSUER_JSON | quote }}
-  delete:
+      - test -f {{ .issuer_json | quote }}
+  list-root-issuer:
     cmds:
-      - |
-        vault delete '{{ .PKI_PATH }}/issuer/{{ .PKI_ISSUER_NAME }}'
+      - task: list-issuer
+        vars:
+          path: '{{ .ROOT_PATH }}'
+          issuer-name: '{{ .ROOT_ISSUER_NAME }}'
+  enable-root-backend:
+    cmds:
+      - task: enable-backend
+        vars:
+          path: '{{ .ROOT_PATH }}'
+          max_lease_ttl: '{{ .ROOT_MAX_LEASE_TTL }}'
+  config-root-issuer:
+    deps:
+      - enable-root-backend
+    cmds:
+      - task: config-issuer
+        vars:
+          issuer_type: root
+          path: '{{ .ROOT_PATH }}'
+          common_name: '{{ .ROOT_COMMON_NAME }}'
+          issuer_name: '{{ .ROOT_ISSUER_NAME }}'
+          ttl: '{{ .ROOT_ISSUER_TTL }}'
+          issuer_json: '{{ .ROOT_ISSUER_JSON }}'
+  enable-int-backend:
+    cmds:
+      - task: enable-backend
+        vars:
+          path: '{{ .INT_PATH }}'
+          max_lease_ttl: '{{ .INT_MAX_LEASE_TTL }}'
+  config-int-issuer:
+    deps:
+      - enable-int-backend
+    cmds:
+      - task: config-issuer
+        vars:
+          issuer_type: intermediate
+          path: '{{ .INT_PATH }}'
+          common_name: '{{ .INT_COMMON_NAME }}'
+          issuer_name: '{{ .INT_ISSUER_NAME }}'
+          ttl: '{{ .INT_ISSUER_TTL }}'
+          issuer_json: '{{ .INT_ISSUER_JSON }}'
+  default:
+    deps:
+      - config-root-issuer
+      - config-int-issuer  
+  delete-issuer:
+    internal: true
+    vars:
+      path: '{{ .path }}'
+      issuer_name: '{{ .issuer_name }}'
+      issuer_json: '{{ .issuer_json }}'
+    cmds:
+      - vault delete '{{ .path }}/issuer/{{ .issuer_name }}'
       - task: utils:rm
         vars:
-          f: '{{ .PKI_ISSUER_JSON }}'
-      - |
-        vault \
-          secrets \
-          disable \
-          {{ .PKI_PATH }}/
+          f: '{{ .issuer_json }}'
+  delete-root-issuer:
+    cmds:
+      - task: delete-issuer
+        vars:
+          path: '{{ .ROOT_PATH }}'
+          issuer_name: '{{ .ROOT_ISSUER_NAME }}'
+          issuer_json: '{{ .ROOT_ISSUER_JSON }}'
+  delete-int-issuer:
+    cmds:
+      - task: delete-issuer
+        vars:
+          path: '{{ .INT_PATH }}'
+          issuer_name: '{{ .INT_ISSUER_NAME }}'
+          issuer_json: '{{ .INT_ISSUER_JSON }}'
+  disable-backend:
+    internal: true
+    vars:
+      path: '{{ .path }}'
+    cmds:
+      - vault secrets disable {{ .path }}/
+  disable-root-backend:
+    cmds:
+      - task: disable-backend
+        vars:
+          path: '{{ .ROOT_PATH }}'
+  disable-int-backend:
+    cmds:
+      - task: disable-backend
+        vars:
+          path: '{{ .INT_PATH }}'
+  delete:
+    cmds:
+      - task: delete-int-issuer
+      - task: disable-int-backend
+      - task: delete-root-issuer
+      - task: disable-root-backend
